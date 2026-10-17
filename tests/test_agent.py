@@ -579,5 +579,5 @@ def test_compact_session_shows_the_arrangement():
     lines = compact_session(session).splitlines()
     assert lines[2] == "Arrangement sections (locators): Drop bar 1, Groove bar 9."
     assert lines[4].endswith("; arrangement clips 0 'Drop Bass' bars 1-8, 1 'Groove Bass' bars 9-32")
-    assert "arrangement_clip=<index>" in lines[-1]
+    assert "arrangement_clip=<index or name>" in lines[-1]
     assert compact_session(SESSION).splitlines()[2].startswith("0 'Drums'")  # no arrangement: as before
