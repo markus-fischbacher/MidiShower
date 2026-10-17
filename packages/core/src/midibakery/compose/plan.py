@@ -24,6 +24,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel
+
 from midibakery.bridge.client import BridgeError
 from midibakery.compose import harmony as harmony_mod
 from midibakery.compose.drums import DrumMap, kick_times, map_pads
@@ -156,16 +158,38 @@ class Session:
         self._clips[key] = state
         return state
 
+    async def _arrangement_clips(self, track: int) -> list[dict[str, Any]]:
+        if track not in self._arrangement:
+            found = (await self._call("arrangement.get", {"track": track}))["tracks"]
+            self._arrangement[track] = found[0]["clips"] if found else []
+        return self._arrangement[track]
+
+    async def arrangement_index(self, track: int, ref: int | str) -> int:
+        """An arrangement clip given by index or by name: the exact name (any case), else the one clip whose
+        name contains it."""
+        if isinstance(ref, int):
+            return ref
+        if ref.strip().isdigit():
+            return int(ref.strip())
+        clips = await self._arrangement_clips(track)
+        wanted = ref.strip().casefold()
+        exact = [c for c in clips if str(c.get("name", "")).strip().casefold() == wanted]
+        found = exact or [c for c in clips if wanted in str(c.get("name", "")).casefold()]
+        if len(found) == 1 or (exact and found):
+            return int(found[0]["index"])
+        info = self.track(track)
+        listed = ", ".join(f"{c['index']} '{c.get('name', '')}'" for c in clips[:16]) or "none"
+        problem = f"{len(found)} arrangement clips match '{ref}'" if found else f"No arrangement clip named '{ref}'"
+        raise BridgeError("NOT_FOUND", f"{problem} on track index {track} '{info.get('name')}' (its clips: {listed})",
+                          {"track": track, "arrangement_clip": ref})
+
     async def _arrangement_clip(self, place: Place) -> ClipState:
         """An arrangement clip: it exists or the request is wrong (no new clips in the Arrangement here)."""
         info = self.track(place.track)
         identity = (info.get("id"), info.get("name"), info.get("kind"))
-        if place.track not in self._arrangement:
-            found = (await self._call("arrangement.get", {"track": place.track}))["tracks"]
-            self._arrangement[place.track] = found[0]["clips"] if found else []
-        clips = self._arrangement[place.track]
+        clips = await self._arrangement_clips(place.track)
         index = place.arrangement_clip
-        assert index is not None
+        assert isinstance(index, int)
         if index >= len(clips):
             listed = ", ".join(f"{c['index']} '{c.get('name', '')}' at beat {c['start']:g}" for c in clips[:12]) or "none"
             raise BridgeError(
@@ -345,9 +369,11 @@ class PlanStore:
 
     def __init__(self, capacity: int = 32):
         self._plans: OrderedDict[str, Plan] = OrderedDict()
+        self._applied: OrderedDict[str, None] = OrderedDict()
         self._capacity = capacity
 
     def put(self, plan: Plan) -> None:
+        self._applied.pop(plan.id, None)
         self._plans[plan.id] = plan
         while len(self._plans) > self._capacity:
             self._plans.popitem(last=False)
@@ -360,6 +386,16 @@ class PlanStore:
 
     def get(self, plan_id: str) -> Plan | None:
         return self._plans.get(plan_id)
+
+    def applied(self, plan_id: str) -> None:
+        """Remember that the plan went into Live: applying it again (the user pressed Apply in the preview,
+        then the model asks too) says so instead of failing."""
+        self._applied[plan_id] = None
+        while len(self._applied) > self._capacity:
+            self._applied.popitem(last=False)
+
+    def was_applied(self, plan_id: str) -> bool:
+        return plan_id in self._applied
 
 
 # --------------------------------------------------------------------------
@@ -591,6 +627,21 @@ async def _resolve(session: Session, step: Generate, targets: set[Place]) -> Gen
     return step.model_copy(update=update) if update else step
 
 
+async def _by_index(session: Session, spec: Any) -> Any:
+    """`spec` (and the clip locations in it, e.g. chords_from) with arrangement clips given by name as indexes."""
+    update: dict[str, Any] = {}
+    for name in type(spec).model_fields:
+        value = getattr(spec, name)
+        if isinstance(value, BaseModel):
+            resolved = await _by_index(session, value)
+            if resolved is not value:
+                update[name] = resolved
+    ref = getattr(spec, "arrangement_clip", None)
+    if isinstance(ref, str):
+        update["arrangement_clip"] = await session.arrangement_index(spec.track, ref)
+    return spec.model_copy(update=update) if update else spec
+
+
 async def build_plan(call: Call, steps: list[Spec]) -> Plan:
     if not steps:
         raise BridgeError("INVALID_PARAMS", "A plan needs at least one step")
@@ -598,6 +649,7 @@ async def build_plan(call: Call, steps: list[Spec]) -> Plan:
     changes = []
     targets: set[Place] = set()
     for step in steps:
+        step = await _by_index(session, step)
         if isinstance(step, Generate):
             step = await _resolve(session, step, targets)
         key = Place.of(step)

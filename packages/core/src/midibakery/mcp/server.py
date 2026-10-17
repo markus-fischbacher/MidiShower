@@ -54,7 +54,8 @@ MidiBakery controls the Ableton Live 12 set that is open right now.
 - Arrangement: bar n starts at beat (n-1) * beats per bar. edit_arrangement never overwrites
   a clip; clip tools take arrangement_clip (from get_arrangement) instead of slot. compose and
   transform_notes too: to rewrite or vary one part of a song (the bass in its Groove), give the
-  arrangement clip; compose then replaces its notes over its whole length.
+  arrangement clip, by index or by its name ('Groove Bass'); compose then replaces its notes over
+  its whole length.
 - A whole song: plan_song, then apply_plan; say which tracks it used and created.
   compose_takes puts variations of a part on take lanes to comp in Live.
 - compose writes one part into the track's first free slot (if_exists for occupied ones),
@@ -455,22 +456,29 @@ def build_server(client: BridgeClient | None = None) -> MCPServer:
 
     async def run_plan(args: dict[str, Any], ctx: Context | None) -> Any:
         plan = plans.get(args["plan_id"])
+        if plan is None and plans.was_applied(args["plan_id"]):
+            return {"ok": True, "already_applied": True,
+                    "message": f"Plan {args['plan_id']} is already in Live (applied from its preview); nothing more to do."}
         if plan is None:
             plans.pop(args["plan_id"])  # raises NOT_FOUND
         assert plan is not None
         if isinstance(plan, SongPlan):
             plans.pop(plan.id)
-            return await apply_song(bridge.call, plan)
+            result = await apply_song(bridge.call, plan)
+            plans.applied(plan.id)
+            return result
         asked = await ask_before_replacing(plan, ctx)
         if asked is not None:
             return asked
         plans.pop(plan.id)
         try:
-            return await apply_plan(bridge.call, plan)
+            result = await apply_plan(bridge.call, plan)
         except BridgeError as exc:
             if exc.code == "CONFLICT":
                 plans.put(plan)
             raise
+        plans.applied(plan.id)
+        return result
 
     server.add_tool(
         _make_tool(PlanChanges, plan_changes),

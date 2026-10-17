@@ -36,7 +36,8 @@ SMALL_SYSTEM_PROMPT = (
     "Give bass and melody chords_from = the chord clip (never a drums track), the bass follow_kick = the drum clip. "
     "Never overwrite a clip unless the user asks for it.\n"
     "- A song in the Arrangement: get_arrangement lists each track's clips (arrangement_clip index, start beat, name). "
-    "To change one part of it, give compose or transform_notes arrangement_clip instead of slot.\n"
+    "To change one part of it, give compose or transform_notes arrangement_clip (its index or its name, "
+    "e.g. 'Groove Bass') instead of slot.\n"
     "- edit_notes and transform_notes change existing notes by note_id from get_clip. "
     "Transpose by half steps/semitones/octaves with semitones (12 = octave); steps means scale steps.\n"
     "- To play a clip, launch it with launch_clip; transport only starts or stops the whole song.\n"
@@ -107,6 +108,7 @@ class Agent:
     async def send(self, text: str, emit: Emit) -> None:
         """Handle one user message until the model stops calling tools. Events go to `emit`."""
         async with self._lock:
+            log.info("user %s", " ".join(text.split())[:300])
             if self._notes:
                 text = "\n".join(self._notes) + "\n\n" + text
                 self._notes.clear()

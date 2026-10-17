@@ -164,8 +164,10 @@ async def test_full_song_sketch_via_plan_changes(client, live):
     kicks = {n["start_time"] for n in _clip_notes(live, 0, 0) if n["pitch"] == 36}
     assert {n["start_time"] for n in _clip_notes(live, 1, 1)} <= kicks | {0.0, 4.0, 8.0, 12.0}
 
+    again = _payload(await server.call_tool("apply_plan", {"plan_id": plan["plan_id"]}))  # applied once only
+    assert again["already_applied"] and live.on_main(lambda: live.song.undo_steps) == undo_before + 1
     with pytest.raises(ToolError, match="NOT_FOUND"):
-        await server.call_tool("apply_plan", {"plan_id": plan["plan_id"]})
+        await server.call_tool("apply_plan", {"plan_id": "unknown"})
 
 
 async def test_compose_preview_then_apply_and_if_exists(client, live):
@@ -348,6 +350,31 @@ async def test_transform_notes_varies_an_arrangement_clip(client, live):
     change = result["changes"][0]
     assert change["arrangement_clip"] == 0 and change["add"] + change["modify"] + change["remove"] > 0
     assert _arrangement_notes(live, 1, 0) != before
+
+
+async def test_an_arrangement_clip_by_name_and_a_plan_applied_twice(client, live):
+    # the chat names the clip ("vary the Groove Bass"); the user applies the preview, then the model asks too
+    server = build_server(client)
+    await client.call("arrangement.edit", {"actions": [
+        {"action": "add_clip", "track": 1, "start": 0, "length": 16, "name": "Drop Bass"},
+        {"action": "add_clip", "track": 1, "start": 16, "length": 16, "name": "Groove Bass"}]})
+    await client.call("notes.apply", {"track": 1, "arrangement_clip": 1, "add": [
+        {"pitch": 33 + (b % 3) * 7, "start_time": b * 0.5, "duration": 0.25} for b in range(32)]})
+    before = _arrangement_notes(live, 1, 1)
+    preview = _payload(await server.call_tool("transform_notes", {"track": 1, "arrangement_clip": "groove bass",
+                                                                  "operation": "variation", "amount": 0.8, "seed": 2, "preview": True}))
+    assert preview["changes"][0]["arrangement_clip"] == 1
+    assert _payload(await server.call_tool("apply_plan", {"plan_id": preview["plan_id"]}))["applied"]
+    again = _payload(await server.call_tool("apply_plan", {"plan_id": preview["plan_id"]}))
+    assert again["already_applied"] and "nothing more to do" in again["message"]
+    assert _arrangement_notes(live, 1, 1) != before and _arrangement_notes(live, 1, 0) == []
+    # a part of a name works when only one clip has it; otherwise the error lists the clips
+    assert _payload(await server.call_tool("compose", {"kind": "bass", "track": 1, "arrangement_clip": "Drop", "seed": 1,
+                                                        "preview": True}))["changes"][0]["arrangement_clip"] == 0
+    with pytest.raises(ToolError, match="2 arrangement clips match 'Bass'.*0 'Drop Bass', 1 'Groove Bass'"):
+        await server.call_tool("compose", {"kind": "bass", "track": 1, "arrangement_clip": "Bass"})
+    with pytest.raises(ToolError, match="No arrangement clip named 'Outro'"):
+        await server.call_tool("compose", {"kind": "bass", "track": 1, "arrangement_clip": "Outro"})
 
 
 async def test_arrangement_targets_are_checked(client, live):

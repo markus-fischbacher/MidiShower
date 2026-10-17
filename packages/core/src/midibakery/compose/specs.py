@@ -14,9 +14,9 @@ from midibakery.compose.transform import ArpDirection, Operation
 TrackIndex = Annotated[int, Field(ge=0, description="Zero-based track index")]
 SlotIndex = Annotated[int, Field(ge=0, description="Zero-based clip slot (= scene) index")]
 ArrangementClip = Annotated[
-    int | None,
-    Field(ge=0, description="Zero-based arrangement clip index on the track (get_arrangement), instead of slot: "
-          "a clip in the Arrangement, e.g. one section of a song"),
+    Annotated[int, Field(ge=0)] | Annotated[str, Field(min_length=1)] | None,
+    Field(description="A clip in the Arrangement instead of slot, e.g. one section of a song: its zero-based "
+          "index on the track (get_arrangement) or its name, e.g. 'Groove Bass'"),
 ]
 Pitch = Annotated[int, Field(ge=0, le=127)]
 Seed = Annotated[
