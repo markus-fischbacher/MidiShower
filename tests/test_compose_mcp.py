@@ -377,6 +377,27 @@ async def test_an_arrangement_clip_by_name_and_a_plan_applied_twice(client, live
         await server.call_tool("compose", {"kind": "bass", "track": 1, "arrangement_clip": "Outro"})
 
 
+async def test_vary_the_second_half_and_hints_for_a_wrong_target(client, live):
+    server = build_server(client)
+    await client.call("arrangement.edit", {"actions": [{"action": "add_clip", "track": 1, "start": 0, "length": 32, "name": "Break Bass"}]})
+    await client.call("notes.apply", {"track": 1, "arrangement_clip": 0, "add": [
+        {"pitch": 33 + (b % 3) * 7, "start_time": b * 0.5, "duration": 0.25} for b in range(64)]})
+    before = _arrangement_notes(live, 1, 0)
+    result = _payload(await server.call_tool("transform_notes", {"track": 1, "arrangement_clip": "Break Bass", "operation": "variation",
+                                                                 "amount": 1.0, "seed": 4, "from_bar": 5}))
+    assert result["changes"][0]["notes_considered"] == 32  # bars 5-8 of the 8 bar clip
+    after = _arrangement_notes(live, 1, 0)
+    assert [n for n in after if n["start_time"] < 16] == [n for n in before if n["start_time"] < 16] and after != before
+    with pytest.raises(ToolError, match="No notes start in bars 9-end"):
+        await server.call_tool("transform_notes", {"track": 1, "arrangement_clip": 0, "operation": "variation", "from_bar": 9})
+    # "vary the Break Bass" as a compose/bass step: the error points to transform_notes
+    with pytest.raises(ToolError, match="operation changes an existing clip: use transform_notes"):
+        await server.call_tool("plan_changes", {"steps": [{"kind": "bass", "track": 1, "arrangement_clip": 0, "operation": "variation"}]})
+    # a new slot clip on a track with a song part says the Arrangement stays as it was
+    new = _payload(await server.call_tool("compose", {"kind": "bass", "track": 1, "seed": 1, "preview": True}))
+    assert "arrangement clips ('Break Bass') stay unchanged" in new["changes"][0]["note"]
+
+
 async def test_arrangement_targets_are_checked(client, live):
     server = build_server(client)
     with pytest.raises(ToolError, match="either slot .* or arrangement_clip"):

@@ -47,6 +47,7 @@
   button[disabled] { opacity: .5; cursor: default; }
   #status { color: var(--fg-2); }
   .empty { padding: 16px; color: var(--fg-2); }
+    .clip .note { margin: 2px 0 4px; font-size: 11px; opacity: 0.8; }
 </style>
 </head>
 <body>
@@ -218,6 +219,12 @@
       detail.textContent = bits.filter(Boolean).join(" · ");
       h.appendChild(detail);
       box.appendChild(h);
+      if (change.note) {
+        const note = document.createElement("p");
+        note.className = "note";
+        note.textContent = change.note;
+        box.appendChild(note);
+      }
       const labels = {};
       for (const [role, pitch] of Object.entries(change.pads || {})) labels[pitch] = role.replace("_", " ");
       const svg = drawClip(clip, meter, labels);

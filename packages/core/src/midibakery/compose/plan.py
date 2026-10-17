@@ -586,6 +586,14 @@ async def _plan_transform(session: Session, spec: TransformSpec) -> ClipChange:
             raise BridgeError("NOT_FOUND", "Unknown note_id(s) in this clip", {"note_ids": unknown})
         wanted = set(spec.note_ids)
         notes = [n for n in notes if n["note_id"] in wanted]
+    if spec.from_bar is not None or spec.to_bar is not None:
+        bpb = session.meter.beats_per_bar
+        start = (spec.from_bar - 1) * bpb if spec.from_bar is not None else float("-inf")
+        end = spec.to_bar * bpb if spec.to_bar is not None else float("inf")
+        notes = [n for n in notes if start - 1e-6 <= n["start_time"] < end - 1e-6]
+        if not notes:
+            bars = f"bars {spec.from_bar or 1}-{spec.to_bar or 'end'}"
+            raise BridgeError("NOT_FOUND", f"No notes start in {bars} of the clip in {place} (it is {(state.length or 0) / bpb:g} bars long)")
     seed = spec.seed if spec.seed is not None else new_seed()
     op = spec.operation
     try:
@@ -656,7 +664,14 @@ async def build_plan(call: Call, steps: list[Spec]) -> Plan:
         if key in targets:
             raise BridgeError("INVALID_PARAMS", f"Two steps target {key}; use one step per clip")
         targets.add(key)
-        changes.append(await _PLANNERS[step.kind](session, step))  # type: ignore[attr-defined]
+        change = await _PLANNERS[step.kind](session, step)  # type: ignore[attr-defined]
+        if change.create is not None and not key.in_arrangement:
+            arranged = await session._arrangement_clips(key.track)
+            if arranged:  # a song's part lives in the Arrangement: a new slot clip leaves it as it was
+                names = ", ".join(f"'{c.get('name', '')}'" for c in arranged[:8])
+                change.info["note"] = (f"A new Session View clip in slot {key.slot + 1}: the track's arrangement clips "
+                                       f"({names}) stay unchanged. To change one, pass arrangement_clip (its name or index).")
+        changes.append(change)
     fingerprints = {}
     for key in targets:
         state = await session.clip(key, include_planned=False)

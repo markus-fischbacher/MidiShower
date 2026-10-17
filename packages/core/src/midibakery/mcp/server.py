@@ -47,7 +47,8 @@ MidiBakery controls the Ableton Live 12 set that is open right now.
   when tracks or scenes are created or deleted; users count from 1 ("track 1" = index 0).
 - Times are beats (quarter notes); pitch 60 = C3. Prefer notes from the song scale.
 - edit_notes and transform_notes are diffs by note_id from get_clip; never rewrite a whole
-  clip to change a few notes. Transpose: semitones are chromatic (12 = octave), steps are scale steps.
+  clip to change a few notes. transform_notes from_bar/to_bar limit it to bars of the clip (its second
+  half). Transpose: semitones are chromatic (12 = octave), steps are scale steps.
   run_batch makes several edits one undo step; undo takes back any write.
 - Mixer: volume and sends in dB as Live shows them; routing by the names get_mixer(options=true)
   lists. Devices inside racks: chain_path [chain, device, ...].
@@ -225,6 +226,9 @@ def _validation_message(exc: ValidationError, model: type[BaseModel]) -> str:
             parts.append(f"{where}: {e['msg']}")
     if any(e["type"] == "extra_forbidden" and len(e["loc"]) == 1 for e in exc.errors()):
         parts.append("fields of this tool: " + ", ".join(model.model_fields))
+    if any(e["type"] == "extra_forbidden" and e["loc"][-1] == "operation" for e in exc.errors()):
+        parts.append("operation changes an existing clip: use transform_notes (in plan_changes a step with kind 'transform'), "
+                     "e.g. operation 'variation' with arrangement_clip")
     return "; ".join(parts)
 
 

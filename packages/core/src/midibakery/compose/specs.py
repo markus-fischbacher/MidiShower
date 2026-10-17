@@ -150,6 +150,9 @@ class TransformSpec(Spec):
     arrangement_clip: ArrangementClip = None
     operation: Operation
     note_ids: list[int] | None = Field(None, description="Only these notes (default: all notes in the clip)")
+    from_bar: Annotated[int, Field(ge=1)] | None = Field(
+        None, description="Only notes starting from this bar of the clip (1 = its first bar), e.g. its second half")
+    to_bar: Annotated[int, Field(ge=1)] | None = Field(None, description="Only notes starting up to this bar of the clip (inclusive)")
     amount: Amount = Field(0.5, description="humanize/variation intensity")
     grid: Annotated[float, Field(gt=0, le=4, description="quantize grid in beats (0.25 = 1/16)")] = 0.25
     strength: Amount = Field(1.0, description="quantize strength")
@@ -172,6 +175,12 @@ class TransformSpec(Spec):
     @model_validator(mode="after")
     def _place(self) -> TransformSpec:
         _one_place(self, required=True)
+        return self
+
+    @model_validator(mode="after")
+    def _bars(self) -> TransformSpec:
+        if self.from_bar is not None and self.to_bar is not None and self.to_bar < self.from_bar:
+            raise ValueError("to_bar must not be before from_bar")
         return self
 
     @model_validator(mode="after")
