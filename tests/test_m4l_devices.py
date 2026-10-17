@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -212,17 +213,43 @@ def test_reference_device_passes_audio_and_embeds_its_code(devices):
     assert "set_or_delete_cue" in code and "warp_markers" in code and "function unlocators()" in code
     assert "add_warp_marker" in code and "function autoWarp(" in code
     labels = sorted(b["text"] for b in boxes.values() if b["maxclass"] == "live.text")
-    assert labels == ["About", "Analyze", "Remove Locators", "Set Locators"]
+    assert labels == ["About", "Analyze", "Lock", "Remove Locators", "Set Locators"]
     menus = [b for b in boxes.values() if b["maxclass"] == "live.menu"]
     menu = next(b for b in menus if b["saved_attribute_attributes"]["valueof"]["parameter_enum"][0] == "Auto")
-    detail = next(b for b in menus if b is not menu)
-    assert detail["saved_attribute_attributes"]["valueof"]["parameter_enum"] == ["Detail: Coarse", "Detail: Normal", "Detail: Fine"]
-    assert ((next(i for i, b in boxes.items() if b is detail), 0), (by_text["prepend detail"], 0)) in lines
-    assert "function detail(" in code
+    assert len(menus) == 1
+    assert not any(b["maxclass"] == "live.dial" for b in boxes.values()) and "function detail(" not in code
     to_v8 = by_text["prepend genre"]
     assert ((next(i for i, b in boxes.items() if b is menu), 0), (to_v8, 0)) in lines
     assert all(b["presentation_rect"][0] + b["presentation_rect"][2] <= build.REFERENCE_WIDTH
                for b in boxes.values() if b.get("presentation"))
+    # Sensitivity: a field per band to "band <key>", shown back through route -> prepend set; Lock to "lock"
+    fields = {b["varname"]: i for i, b in boxes.items() if b["maxclass"] == "live.numbox"}
+    assert sorted(fields) == sorted(f"Sensitivity {label}" for label, _ in build.SENSITIVITY_BANDS)
+    route = by_text["route kick low mid high"]
+    for n, (label, key) in enumerate(build.SENSITIVITY_BANDS):
+        assert ((fields[f"Sensitivity {label}"], 0), (by_text[f"prepend band {key}"], 0)) in lines
+        shown = next(dst for (src, dst) in lines if src == (route, n))[0]
+        assert boxes[shown]["text"] == "prepend set" and ((shown, 0), (fields[f"Sensitivity {label}"], 0)) in lines
+    lock = next(i for i, b in boxes.items() if b.get("varname") == "Sensitivity Lock")
+    assert boxes[lock]["mode"] == 1 and ((lock, 0), (by_text["prepend lock"], 0)) in lines
+    v8_id = next(i for i, b in boxes.items() if b["maxclass"] == "v8.codebox")
+    assert ((v8_id, 2), (route, 0)) in lines and "function band(" in code and "function lock(" in code
+    # each field level with its lane in the view (reference-view.js: lanes start below the header and blocks)
+    view_js = (build.SRC / "reference-view.js").read_text()
+    const = {k: int(re.search(rf"var {k} = (\d+);", view_js).group(1)) for k in ("HEADER", "BLOCKS", "LANE")}
+    lanes = re.findall(r'\["(\w+)", "(\w+)", -?\d+, \d+\]', view_js)
+    assert [key for _, key in lanes] == [key for _, key in build.SENSITIVITY_BANDS]
+    for n, (label, _) in enumerate(build.SENSITIVITY_BANDS):
+        top = const["HEADER"] + 2 + const["BLOCKS"] + 4 + const["LANE"] * n
+        _, fy, _, fh = boxes[fields[f"Sensitivity {label}"]]["presentation_rect"]
+        assert fy + fh / 2 == top + (const["LANE"] - 2) / 2
+    # the right column and Lock on the same rows: every control's centre on a row of the lane grid
+    for b in boxes.values():
+        if b.get("presentation") and b["maxclass"] in ("live.text", "live.menu", "live.numbox"):
+            _, y, _, h = b["presentation_rect"]
+            assert (y + h / 2 - const["HEADER"] - 2 - const["BLOCKS"] - 4) % const["LANE"] == (const["LANE"] - 2) / 2, b.get("text")
+    shown_rects = [b["presentation_rect"] for b in boxes.values() if b.get("presentation")]
+    assert not any(_overlap(a, b) for i, a in enumerate(shown_rects) for b in shown_rects[i + 1:])
 
 
 def _overlap(a, b):

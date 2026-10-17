@@ -304,26 +304,48 @@ function perBar(beats, beatsPerBar) {
 
 const FEATURES = ["low", "bass", "mid", "high", "total"];
 
-function vector(bars) {
+// The device's Sensitivity fields, 0..100 each (default 50). Their mean is how finely the song is split:
+// at 100 every change found is a section, lower merges more (MERGING). Their ratio is what counts as a
+// change: each band weighs as much as its field against the highest one, the total level as their mean.
+// The fields are the view's lanes: Kick, Lows (30-300 Hz: the low and bass bands), Mids, Hats (high).
+const SENSITIVITY = ["kick", "low", "mid", "high"];
+const DEFAULT_SENSITIVITY = 50;
+const FULL_SENSITIVITY = [1, 1, 1, 1, 1, 1];
+
+/** {values: the fields, level: their mean 0..1, shape: weights in vector()'s order (low, bass, mid, high,
+ * total, kick), each field over the highest} from {kick, low, mid, high: 0..100}. */
+function weights(sensitivity = {}) {
+  const values = {};
+  for (const band of SENSITIVITY) {
+    const value = Number(sensitivity[band]);
+    values[band] = Number.isFinite(value) ? Math.max(0, Math.min(100, Math.round(value))) : DEFAULT_SENSITIVITY;
+  }
+  const top = Math.max(...SENSITIVITY.map((band) => values[band]));
+  const w = (band) => (top > 0 ? values[band] / top : 1);
+  const shape = [w("low"), w("low"), w("mid"), w("high"), mean(SENSITIVITY.map(w)), w("kick")];
+  return { values, level: mean(SENSITIVITY.map((band) => values[band])) / 100, shape };
+}
+
+function vector(bars, w = FULL_SENSITIVITY) {
   const v = FEATURES.map((band) => mean(bars.map((b) => Math.max(-40, b[band]))));
   v.push(mean(bars.map((b) => b.kick)) * 12); // a kick that comes or goes counts like 12 dB
-  return v;
+  return v.map((x, i) => x * w[i]);
 }
 
 const distance = (a, b) => Math.sqrt(a.reduce((s, x, i) => s + (x - b[i]) ** 2, 0) / a.length);
 
 /** How much the phrase after `b` differs from the one before: the largest change of one feature, so
  * a single element coming in or out (hats, a pad) counts as much as everything changing a little. */
-function novelty(bars, b, phrase) {
-  const before = vector(bars.slice(Math.max(0, b - phrase), b));
-  const after = vector(bars.slice(b, b + phrase));
+function novelty(bars, b, phrase, w) {
+  const before = vector(bars.slice(Math.max(0, b - phrase), b), w);
+  const after = vector(bars.slice(b, b + phrase), w);
   return Math.max(...before.map((x, i) => Math.abs(after[i] - x)));
 }
 
 /** Section starts on the genre's bar grid: the strongest changes, each at least a phrase from the next. */
-function boundaries(bars, threshold, { step, phrase }) {
+function boundaries(bars, threshold, { step, phrase }, w = FULL_SENSITIVITY) {
   const candidates = [];
-  for (let b = step; b <= bars.length - step; b += step) candidates.push({ b, n: novelty(bars, b, phrase) });
+  for (let b = step; b <= bars.length - step; b += step) candidates.push({ b, n: novelty(bars, b, phrase, w) });
   const strength = (b) => (candidates.find((c) => c.b === b) || { n: 0 }).n;
   const peaks = candidates.filter((c) => c.n >= threshold && c.n >= strength(c.b - step) && c.n >= strength(c.b + step));
   // strongest first; on a tie the 8 bar phrase wins
@@ -406,51 +428,61 @@ function name(sections, names = {}) {
   return sections;
 }
 
-// How finely the song is split: every change found (fine), neighbours of the same kind as one section
-// (normal: four breaks in a row are one long break), or the kick's big picture (coarse: a drop and the
-// groove next to it are one drop). The changes within a section stay as its phrases.
-const DETAILS = ["coarse", "normal", "fine"];
+// MERGING: neighbours merge, the most alike first, while their cost stays under a limit that rises from
+// 0 (fields at 100: every change found is a section) to MAX_COST (fields at 0). The same kind next to
+// itself costs how far apart the two sound (four breaks in a row are one long break by 50); a drop next
+// to its groove costs DROP_GROOVE more (one drop below 50); other kinds, the intro and the outro never
+// merge. The changes within a section stay as its phrases.
+const MAX_COST = 24; // dB: phrases of one kind differ by up to ~8 dB (The Signal's breaks)
+const DROP_GROOVE = 12;
 const FULL = ["drop", "groove"];
 
-function merge(sections, bars, detail, names) {
-  if (detail === "fine") return sections;
-  const together = (a, b) => a.kind === b.kind || (detail === "coarse" && FULL.includes(a.kind) && FULL.includes(b.kind));
-  const out = [];
-  for (const s of sections) {
-    const last = out[out.length - 1];
-    const phrase = { start_bar: s.start_bar, bars: s.bars, kind: s.kind, energy: s.energy, kick: s.kick, elements: s.elements };
-    if (last && !["intro", "outro"].includes(s.kind) && together(last, s)) {
-      last.phrases.push(phrase);
-      if (s.kind === "drop") last.kind = "drop";
-    } else {
-      out.push({ kind: s.kind, phrases: [phrase] });
-    }
-  }
-  return name(out.map((m) => {
-    const first = m.phrases[0].start_bar - 1;
-    const end = first + m.phrases.reduce((n, p) => n + p.bars, 0);
-    const merged = { ...describe(bars, first, end), kind: m.kind };
-    return m.phrases.length > 1 ? { ...merged, phrases: m.phrases } : merged;
-  }), names);
+function cost(bars, a, b, shape) {
+  if (["intro", "outro"].includes(a.kind) || ["intro", "outro"].includes(b.kind)) return Infinity;
+  const apart = (s) => bars.slice(s.start_bar - 1, s.start_bar - 1 + s.bars);
+  const sound = distance(vector(apart(a), shape), vector(apart(b), shape));
+  if (a.kind === b.kind) return sound;
+  if (FULL.includes(a.kind) && FULL.includes(b.kind)) return DROP_GROOVE + sound / 2;
+  return Infinity;
 }
 
-function analyze(samples, sampleRate, beats, { beatsPerBar = 4, threshold = 4, genre = "auto", bpm = 0, detail = "normal" } = {}) {
+function merge(sections, bars, names = {}, w = weights()) {
+  const limit = (1 - w.level) * MAX_COST;
+  const out = sections.map((s) => ({ ...s, phrases: [{ start_bar: s.start_bar, bars: s.bars, kind: s.kind, energy: s.energy, kick: s.kick, elements: s.elements }] }));
+  for (;;) {
+    let best = -1;
+    let lowest = limit;
+    for (let i = 0; i + 1 < out.length; i++) {
+      const c = cost(bars, out[i], out[i + 1], w.shape);
+      if (c < lowest) [best, lowest] = [i, c];
+    }
+    if (best < 0) break;
+    const [a, b] = out.slice(best, best + 2);
+    const first = a.start_bar - 1;
+    const together = { ...describe(bars, first, first + a.bars + b.bars), kind: a.kind === "drop" || b.kind === "drop" ? "drop" : a.kind,
+      phrases: a.phrases.concat(b.phrases) };
+    out.splice(best, 2, together);
+  }
+  return name(out.map(({ phrases, ...s }) => (phrases.length > 1 ? { ...s, phrases } : s)), names);
+}
+
+function analyze(samples, sampleRate, beats, { beatsPerBar = 4, threshold = 4, genre = "auto", bpm = 0, sensitivity = {} } = {}) {
   const genreProfile = profile(genre, bpm);
   const fr = frames(samples, sampleRate);
   const bars = perBar(perBeat(fr, beats), beatsPerBar);
   const kicks = kickPresence(lowOnsets(fr, beats, beatsPerBar), bars.map((b) => b.low > -12));
   // a kick's tail can rise out of near silence; a bar this quiet in the lows has no kick
   bars.forEach((b, i) => (b.kick = b.low > KICK_MIN_LOW_DB ? kicks[i] ?? 0 : 0));
-  const starts = boundaries(bars, threshold, genreProfile);
+  const w = weights(sensitivity);
+  const starts = boundaries(bars, threshold, genreProfile, w.shape);
   const found = label(starts.map((s, i) => describe(bars, s, starts[i + 1] ?? bars.length)), genreProfile.names);
-  if (!DETAILS.includes(detail)) detail = "normal";
-  const sections = merge(found, bars, detail, genreProfile.names);
+  const sections = merge(found, bars, genreProfile.names, w);
   const k = key(chromas(samples, sampleRate));
   const round = (x) => Math.round(x * 10) / 10;
   return {
     bars: bars.length,
     genre: genreProfile.genre,
-    detail,
+    sensitivity: w.values,
     key: k.name,
     sections,
     lanes: {
@@ -571,4 +603,4 @@ function markerTempo(markers) {
   return b.sample_time > a.sample_time ? Math.round(((b.beat_time - a.beat_time) / (b.sample_time - a.sample_time)) * 60 * 10) / 10 : null;
 }
 
-module.exports = { GENRES, DETAILS, analyze, merge, chromas, beatGrid, estimateGrid, markerTempo, fft, key, BANDS };
+module.exports = { GENRES, SENSITIVITY, weights, analyze, merge, chromas, beatGrid, estimateGrid, markerTempo, fft, key, BANDS };

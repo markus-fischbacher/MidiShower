@@ -449,12 +449,22 @@ def transform_device() -> dict[str, Any]:
     return p.to_json(kind="transformation", title="MidiBakery Transform", width=TOOL_WIDTH, height=TOOL_HEIGHT)
 
 
-REFERENCE_WIDTH, REFERENCE_HEIGHT = 700.0, 169.0
+REFERENCE_WIDTH, REFERENCE_HEIGHT = 800.0, 169.0
+SENSITIVITY_BANDS = (("Kick", "kick"), ("Lows", "low"), ("Mids", "mid"), ("Hats", "high"))  # the view's lanes
+# Where reference-view.js draws its lanes (HEADER + 2 + BLOCKS + 4, then LANE each, LANE - 2 high): each
+# Sensitivity field sits level with its lane.
+LANES_TOP, LANE_HEIGHT = 16 + 2 + 32 + 4, 22
+
+
+def _row(k: int) -> float:
+    """The reference device's control rows on the view's lane grid: 2..5 are the lanes, 0 and 1 above them
+    (y 10 and 32), 6 below; a control 18 high sits at _row(k) + 1, centred like the fields."""
+    return LANES_TOP + LANE_HEIGHT * (k - 2)
 
 
 def reference_device() -> dict[str, Any]:
-    """Layout (700 x 169): the view (sections and lanes) on the left; Analyze, the locator buttons, Genre, Detail
-    and About on the right.
+    """Layout (800 x 169): the view (sections and lanes) on the left, next to it the Sensitivity per lane (Kick,
+    Lows, Mids, Hats) and Lock; Analyze, the locator buttons, Genre and About on the right.
     Audio passes through: the device sits on the reference song's own audio track."""
     p = Patcher()
     plugin = p.obj("plugin~", 20, 20, inlets=2, outlets=["signal", "signal"], width=60)
@@ -463,7 +473,7 @@ def reference_device() -> dict[str, Any]:
     p.connect(plugin, 1, plugout, 1)
 
     code = (SRC / "reference.js").read_text(encoding="utf-8")
-    v8 = p.box("v8.codebox", (120, 140, 420, 300), inlets=1, outlets=["", ""], code=code, filename="none",
+    v8 = p.box("v8.codebox", (120, 140, 420, 300), inlets=1, outlets=["", "", ""], code=code, filename="none",
                fontface=0, fontname="<Monospaced>", fontsize=10.0)
     node = p.obj("node.script midibakery-reference.js @autostart 1 @watch 0", 120, 480, outlets=["", ""], width=320)
     p.connect(v8, 0, node)
@@ -483,24 +493,46 @@ def reference_device() -> dict[str, Any]:
                  textfile={"text": view_code, "filename": "none", "flags": 0, "embed": 1, "autowatch": 0})
     p.connect(v8, 1, view)
 
-    buttons = (("Analyze", "analyze"), ("Set Locators", "locators"), ("Remove Locators", "unlocators"))
-    for i, (label, message) in enumerate(buttons):
-        button = p.parameter("live.text", (300 + 90 * i, 20, 80, 18), (606, 6 + 24 * i, 90, 20), name=label, short=label,
+    # the right column in two blocks on the lane grid: Genre and Analyze on top (rows 0-1), the locator
+    # buttons and About at the bottom (rows 4-6, About level with Lock)
+    buttons = (("Analyze", "analyze", 1), ("Set Locators", "locators", 4), ("Remove Locators", "unlocators", 5))
+    for i, (label, message, row) in enumerate(buttons):
+        button = p.parameter("live.text", (300 + 90 * i, 20, 80, 18), (706, _row(row) + 1, 90, 18), name=label, short=label,
                              ptype=ENUM, inlets=1, outlets=["", ""], parameter_enum=["val1", "val2"], parameter_mmax=1)
         p.boxes[-1]["box"].update({"mode": 0, "text": label, "texton": label})
         _on_press(p, button, message, v8, 300 + 90 * i, 50)
-    genre = _menu(p, (600, 20, 110, 15), (606, 80, 90, 18), "Genre", "Genre",
+    genre = _menu(p, (600, 20, 110, 15), (706, _row(0) + 1, 90, 18), "Genre", "Genre",
                   ["Auto", "House", "Melodic Techno", "Peak Time Techno", "Drum & Bass", "Trap"], 0)
     to_v8 = p.obj("prepend genre", 600, 50, width=90)
     p.connect(genre, 0, to_v8)
     p.connect(to_v8, 0, v8)
-    # Detail: how far neighbouring sections are merged (their phrases stay in the analysis)
-    detail = _menu(p, (720, 20, 110, 15), (606, 102, 90, 18), "Detail", "Detail",
-                   ["Detail: Coarse", "Detail: Normal", "Detail: Fine"], 1)
-    detail_to_v8 = p.obj("prepend detail", 720, 50, width=90)
-    p.connect(detail, 0, detail_to_v8)
-    p.connect(detail_to_v8, 0, v8)
-    _about(p, (606, 148, 90, 18), node, 760, 20)
+    # Sensitivity: the fields' mean sets how finely the song is split (100: every change; lower merges more,
+    # the phrases stay in the analysis), their ratio how much each band's changes count; Lock moves them together
+    p.comment("Sensitivity", (860, 100, 80, 14), presentation=(604, _row(1) + 3, 92, 14), fontsize=9.0, **THEMED_TEXT)
+    route = p.obj("route " + " ".join(key for _, key in SENSITIVITY_BANDS), 860, 400,
+                  outlets=[""] * (len(SENSITIVITY_BANDS) + 1), width=200)
+    p.connect(v8, 2, route)
+    for i, (label, key) in enumerate(SENSITIVITY_BANDS):
+        x, y = 860 + 70 * i, 140
+        lane_y = LANES_TOP + LANE_HEIGHT * i  # the lane is LANE_HEIGHT - 2 high: the 16 px field centred on it
+        p.comment(label, (x, y, 40, 14), presentation=(604, lane_y + 3, 40, 14), fontsize=9.0, **THEMED_TEXT)
+        field = p.parameter("live.numbox", (x, y + 20, 44, 15), (648, lane_y + 2, 48, 16), name=f"Sensitivity {label}",
+                            short=label, ptype=FLOAT, inlets=1, outlets=["", "float"], parameter_mmin=0.0,
+                            parameter_mmax=100.0, parameter_initial=[50.0], parameter_initial_enable=1,
+                            parameter_unitstyle=UNIT_INT)
+        to_v8 = p.obj(f"prepend band {key}", x, y + 50, width=110)
+        p.connect(field, 0, to_v8)
+        p.connect(to_v8, 0, v8)
+        shown = p.obj("prepend set", x, 430, width=70)
+        p.connect(route, i, shown)
+        p.connect(shown, 0, field)
+    lock = p.parameter("live.text", (860, 220, 50, 15), (604, _row(6) + 1, 92, 18), name="Sensitivity Lock", short="Lock",
+                       ptype=ENUM, inlets=1, outlets=["", ""], parameter_enum=["val1", "val2"], parameter_mmax=1)
+    p.boxes[-1]["box"].update({"mode": 1, "text": "Lock", "texton": "Locked"})
+    lock_to_v8 = p.obj("prepend lock", 860, 250, width=80)
+    p.connect(lock, 0, lock_to_v8)
+    p.connect(lock_to_v8, 0, v8)
+    _about(p, (706, _row(6) + 1, 90, 18), node, 760, 20)
     return p.to_json(kind="audio_effect", title="MidiBakery Reference Analyzer", width=REFERENCE_WIDTH, height=REFERENCE_HEIGHT)
 
 

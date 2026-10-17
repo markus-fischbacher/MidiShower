@@ -5,25 +5,30 @@
  * plays at its own tempo, so its bars drift away from the Set's: after its tempo is detected the
  * device warps it onto the Set's grid (bar 1 on a bar line) and analyzes it again.
  *
- * inlet 0:  init (live.thisdevice), analyze, locators, unlocators, genre <menu index>, detail <menu index>,
+ * inlet 0:  init (live.thisdevice), analyze, locators, unlocators, genre <menu index>,
+ *           band <kick|low|mid|high> <0..100>, lock <0|1>,
  *           result <json>,
  *           status <text>
  * outlet 0: to node.script (analyze / lookup / log <json>)
  * outlet 1: to the view (show <json>, status <text>)
+ * outlet 2: to the Sensitivity fields (<band> <value>: shown without being sent back here)
  */
 
 autowatch = 0;
 inlets = 1;
-outlets = 2;
+outlets = 3;
 
 var ready = false;
 var current = null; // the last result
 // the Genre menu's items, as plan_song names the genres
 var GENRES = ["auto", "house", "melodic_techno", "peak_time_techno", "drum_and_bass", "trap"];
 var chosen = "auto";
-// the Detail menu's items: how far neighbouring sections are merged
-var DETAILS = ["coarse", "normal", "fine"];
-var chosenDetail = "normal";
+var settleTask = null;
+var SETTLE_MS = 400; // a field dragged runs through many values: analyze once it rests
+// the Sensitivity fields, 0..100 per band; with Lock on, changing one moves the others by as much
+var BANDS = ["kick", "low", "mid", "high"]; // the view's lanes: Kick, Lows, Mids, Hats
+var sensitivity = { kick: 50, low: 50, mid: 50, high: 50 };
+var locked = false;
 var job = null; // locator job: {queue, home, phase, ticks, task}
 var LOCATOR_TICK_MS = 60;
 var LOCATOR_TIMEOUT_TICKS = 40; // ~2.4 s per locator, then it is skipped
@@ -97,7 +102,7 @@ function referenceClip() {
     warp_markers: warpMarkers(clip),
     tempo: one(new LiveAPI("live_set"), "tempo"),
     genre: chosen,
-    detail: chosenDetail,
+    sensitivity: sensitivity,
   };
 }
 
@@ -105,11 +110,38 @@ function genre(index) {
   chosen = GENRES[index] || "auto";
 }
 
-/** A new Detail splits the song again: the analysis takes a second. */
-function detail(index) {
-  var was = chosenDetail;
-  chosenDetail = DETAILS[index] || "normal";
-  if (ready && current && chosenDetail !== was && !job) analyze();
+/** New sensitivities split the song again once the fields rest: the analysis takes a second. */
+function reanalyzeLater() {
+  if (!ready || !current) return;
+  if (!settleTask) settleTask = new Task(settled, this);
+  settleTask.cancel();
+  settleTask.schedule(SETTLE_MS);
+}
+
+/** One band's sensitivity; with Lock on the others follow by the same amount (kept within 0..100). */
+function band(name, value) {
+  if (!sensitivity.hasOwnProperty(name)) return;
+  value = Math.max(0, Math.min(100, Math.round(Number(value))));
+  var delta = value - sensitivity[name];
+  if (delta === 0) return;
+  sensitivity[name] = value;
+  if (locked) {
+    for (var i = 0; i < BANDS.length; i++) {
+      if (BANDS[i] === name) continue;
+      sensitivity[BANDS[i]] = Math.max(0, Math.min(100, sensitivity[BANDS[i]] + delta));
+      outlet(2, BANDS[i], sensitivity[BANDS[i]]);
+    }
+  }
+  reanalyzeLater();
+}
+
+function lock(on) {
+  locked = Number(on) > 0;
+}
+
+function settled() {
+  if (job || warpJob) settleTask.schedule(SETTLE_MS);
+  else analyze();
 }
 
 function init() {

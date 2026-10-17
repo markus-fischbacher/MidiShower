@@ -133,7 +133,7 @@ function runWarped(clip, warp, samples, rate) {
   const firstClipBeat = clip.start_marker + firstBar * BEATS_PER_BAR - clip.start;
   const beats = beatGrid(warp, firstClipBeat, (lastBar - firstBar) * BEATS_PER_BAR, rate)
     .map((s) => Math.max(0, Math.min(samples.length, s)));
-  const result = analyze(samples, rate, beats, { beatsPerBar: BEATS_PER_BAR, genre: clip.genre, bpm: markerTempo(warp), detail: clip.detail });
+  const result = analyze(samples, rate, beats, { beatsPerBar: BEATS_PER_BAR, genre: clip.genre, bpm: markerTempo(warp), sensitivity: clip.sensitivity });
   const place = (s) => ({ ...s, start_bar: firstBar + s.start_bar, beat: (firstBar + s.start_bar - 1) * BEATS_PER_BAR });
   const sections = placed(result.sections, place);
   return { ...result, sections, tempo: markerTempo(warp), first_bar: firstBar + 1, bar_grid: "arrangement" };
@@ -149,7 +149,7 @@ function runUnwarped(clip, samples, rate) {
   const to = Math.min(samples.length, Math.round((offset + seconds) * rate));
   const grid = estimateGrid(samples, rate, { from, to, genre: clip.genre });
   if (grid.beats.length < 8 * BEATS_PER_BAR) throw new Error("the clip is shorter than 8 bars");
-  const result = analyze(samples, rate, grid.beats, { beatsPerBar: BEATS_PER_BAR, genre: clip.genre, bpm: grid.bpm, detail: clip.detail });
+  const result = analyze(samples, rate, grid.beats, { beatsPerBar: BEATS_PER_BAR, genre: clip.genre, bpm: grid.bpm, sensitivity: clip.sensitivity });
   const beatAt = (sample) => Math.round((clip.start + ((sample / rate - offset) * clip.tempo) / 60) * 1000) / 1000;
   const sections = placed(result.sections, (s) => ({ ...s, beat: beatAt(grid.beats[(s.start_bar - 1) * BEATS_PER_BAR]) }));
   // what the device needs to warp the clip onto this grid: the tempo, where bar 1 starts and the file's length (s)
@@ -171,7 +171,7 @@ async function run(clip) {
     warped: Boolean(warp),
     bar_grid: result.bar_grid, // "arrangement": bars are the Arrangement's; "song": the song's own bars from its start
     genre: result.genre, // as chosen in the device; "auto" guesses only the phrase length (D&B from 160 BPM)
-    detail: result.detail, // coarse | normal | fine: how far neighbouring sections are merged (their phrases stay)
+    sensitivity: result.sensitivity, // 0..100 per band (kick, low, mid, high): how much its changes count; lower merges more
     key: result.key,
     first_bar: result.first_bar,
     bars: result.bars,

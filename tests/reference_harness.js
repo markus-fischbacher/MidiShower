@@ -31,5 +31,5 @@ if (process.argv[3]) {
 }
 const markers = [{ beat_time: 0, sample_time: 0 }, { beat_time: 256, sample_time: (256 * 60) / bpm }];
 const grid = beatGrid(markers, 0, bars * 4, rate);
-const result = analyze(s, rate, grid, { genre: process.env.GENRE || "auto", bpm });
+const result = analyze(s, rate, grid, { genre: process.env.GENRE || "auto", bpm, sensitivity: JSON.parse(process.env.SENSITIVITY || "{}") });
 console.log(JSON.stringify({ tempo: markerTempo(markers), grid: [grid[0], grid[4], grid[256]], ...result }));
